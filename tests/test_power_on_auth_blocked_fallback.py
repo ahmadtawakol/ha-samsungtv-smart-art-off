@@ -67,6 +67,7 @@ def _device(
     device._host = "192.168.1.55"
     device._state = MediaPlayerState.OFF
     device._end_of_power_off = None
+    device._art_mode_is_on = MagicMock(return_value=None)
 
     device._ws = MagicMock()
     device._ws.artmode_status = ArtModeStatus.Unavailable

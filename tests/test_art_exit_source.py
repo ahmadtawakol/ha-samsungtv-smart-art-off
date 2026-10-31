@@ -76,6 +76,9 @@ class _Device:
     def _get_option(self, key, default=None):
         return self._options.get(key, default)
 
+    def _art_mode_is_on(self):
+        return None
+
     async def _async_select_source(self, source, *, assume_on=False):
         self.calls.append(("select", source, assume_on))
         return await _select(self, source, assume_on=assume_on)

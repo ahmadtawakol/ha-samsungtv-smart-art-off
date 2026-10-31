@@ -39,6 +39,7 @@ def _device(*, external=True, muted=False, volume=0.20):
     device = object.__new__(SamsungTVDevice)
 
     device._state = MediaPlayerState.ON
+    device._art_mode_is_on = MagicMock(return_value=False)
     device._attr_is_volume_muted = muted
     device._attr_volume_level = volume
 

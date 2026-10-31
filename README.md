@@ -1,5 +1,11 @@
 # SamsungTV Smart and Art Mode
 
+This fork of [TheFab21/ha-samsungtv-smart](https://github.com/TheFab21/ha-samsungtv-smart)
+reports the media player as **off while displaying Art Mode**, while retaining
+the newer Art Mode detection, attributes, and dedicated Art Mode controls.
+Use `https://github.com/ahmadtawakol/ha-samsungtv-smart-art-off` when adding the
+custom repository in HACS.
+
 [![HACS](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
 [![Version](https://img.shields.io/github/v/release/TheFab21/ha-samsungtv-smart?style=flat&color=blue)](https://github.com/TheFab21/ha-samsungtv-smart/releases/latest)
 [![HA Version](https://img.shields.io/badge/Home%20Assistant-%3E%3D2025.6.0-green.svg)](https://www.home-assistant.io)
@@ -125,7 +131,7 @@ This fork is a drop-in replacement for ollo69's integration. Migration is straig
 
 3. **Restart Home Assistant** before proceeding. This ensures the old domain is fully cleared from HA's internal registry.
 
-4. **Install this fork** via HACS (add `https://github.com/TheFab21/ha-samsungtv-smart` as a custom repository, see [Installation](#installation)), then restart Home Assistant again.
+4. **Install this fork** via HACS (add `https://github.com/ahmadtawakol/ha-samsungtv-smart-art-off` as a custom repository, see [Installation](#installation)), then restart Home Assistant again.
 
 5. **Verify files are on disk** before trying to add the integration:
    ```bash
@@ -157,7 +163,7 @@ This fork is a drop-in replacement for ollo69's integration. Migration is straig
 This integration is a **custom repository** — it is not in the HACS default store, so it has to be added once by hand (there is no one-click link for custom repositories):
 
 1. Go to **HACS → Integrations → ⋮ (top right) → Custom repositories**
-2. Add `https://github.com/TheFab21/ha-samsungtv-smart` as category **Integration**
+2. Add `https://github.com/ahmadtawakol/ha-samsungtv-smart-art-off` as category **Integration**
 3. Search for **SamsungTV Smart**, install it, and restart Home Assistant
 
 
@@ -614,12 +620,16 @@ watched — while a `media_player` only has `on` and `off`:
 | the panel is | `media_player` state | `art_mode_status` |
 |---|---|---|
 | in standby | `off` | *(absent)* |
-| showing artwork | `on` | `on` |
+| showing artwork | `off` | `on` |
 | being watched | `on` | `off` |
 
-Art Mode reports `on` because the panel *is* powered: it answers commands,
-accepts uploads, and `turn_on` would do nothing. The third state lives in the
-attribute. To automate on "someone is actually watching":
+In this fork, Art Mode reports `off` so the media player distinguishes artwork
+from normal viewing. The panel remains powered: Art Mode detection, polling,
+uploads, and the dedicated Art Mode controls continue to work. The Power switch
+still reports `on` while artwork is displayed. `media_player.turn_on` leaves
+Art Mode, and selecting a source uses the existing Art Mode wake handling.
+The `art_mode_status` attribute distinguishes artwork from standby. To automate
+on "someone is actually watching":
 
 ```yaml
 template:

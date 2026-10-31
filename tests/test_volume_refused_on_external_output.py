@@ -50,6 +50,7 @@ REFUSED = SamsungIPControlModeLockedError(
 def _device(output="CINEMA 60"):
     device = object.__new__(SamsungTVDevice)
     device._state = MediaPlayerState.ON
+    device._art_mode_is_on = MagicMock(return_value=False)
     device._attr_is_volume_muted = False
     device._attr_volume_level = 0.2
     device._st = None
