@@ -841,8 +841,9 @@ class FrameArtCoordinator(DataUpdateCoordinator):
             return data
 
         try:
-            # First, try to get art_mode from media_player state (more reliable)
-            # This avoids double API calls and keeps sensor in sync with media_player
+            # Keep the media player's canonical verdict (including IP/panel
+            # truth), but do not let an "on" attribute stop its own cache from
+            # refreshing: the player may be reading this same shared Art API.
             media_player_art_mode = self._get_media_player_art_mode()
             if media_player_art_mode is not None:
                 data["art_mode"] = media_player_art_mode
@@ -850,12 +851,15 @@ class FrameArtCoordinator(DataUpdateCoordinator):
                     "Frame Art: Using media_player art_mode_status: %s",
                     media_player_art_mode,
                 )
-            else:
-                # Fallback to direct API call if media_player state not available
+            if media_player_art_mode != "off":
+                # A Frame can omit the art-off broadcast when returning to an
+                # input. Read status before the art-only requests, which can
+                # time out on that input and otherwise leave the cache on.
                 try:
                     async with asyncio.timeout(8):
                         art_mode = await self._art_api.get_artmode()
-                        data["art_mode"] = art_mode
+                        if media_player_art_mode is None:
+                            data["art_mode"] = art_mode
                         self._log.debug("Frame Art: Direct API art_mode: %s", art_mode)
                 except asyncio.TimeoutError:
                     self._log.debug("Timeout getting art mode status")
@@ -872,9 +876,9 @@ class FrameArtCoordinator(DataUpdateCoordinator):
             # 13-TV fleet, none of which fixed anything because nothing was
             # broken (#273). Neither the current artwork nor the slideshow state
             # can change while art mode is off, so skip those reads and keep the
-            # values already published. get_artmode() above is still polled every
-            # cycle: it is the request the TV does answer, and it is what tells
-            # us when to resume. Only a positive "off" skips — an unknown reading
+            # values already published. get_artmode() above refreshes the shared
+            # cache while art is on or unknown; a known off still sends no art
+            # requests. Only a positive "off" skips — an unknown reading
             # (None, e.g. the media_player state is not up yet) still polls.
             art_mode_off = data["art_mode"] == "off"
             if art_mode_off and self.data:

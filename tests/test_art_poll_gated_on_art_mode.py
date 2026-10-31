@@ -21,6 +21,7 @@ exec'd from source against a fake art API that records every request.
 import asyncio
 from pathlib import Path
 import unittest
+from unittest.mock import AsyncMock
 
 ROOT = Path(__file__).parents[1] / "custom_components" / "samsungtv_smart"
 SENSOR = (ROOT / "sensor.py").read_text()
@@ -199,6 +200,36 @@ class ArtModeOnTest(unittest.TestCase):
 
     def test_the_current_artwork_is_still_read(self):
         self.assertIn("get_current_artwork", self.coordinator._art_api.calls)
+
+
+class ArtModeRefreshTest(unittest.TestCase):
+    """A published Art Mode value must not prevent its own cache refreshing."""
+
+    def test_an_on_attribute_still_reads_status_from_the_tv(self):
+        coordinator = _Coordinator("off")
+        coordinator._media_player_art_mode = "on"
+
+        _run(coordinator)
+
+        self.assertIn("get_artmode", coordinator._art_api.calls)
+
+    def test_the_media_players_canonical_verdict_is_preserved(self):
+        # IP Control/panel truth can legitimately outrank an incorrect WS reply.
+        coordinator = _Coordinator("off")
+        coordinator._media_player_art_mode = "on"
+
+        data = _run(coordinator)
+
+        self.assertEqual(data["art_mode"], "on")
+
+    def test_a_failed_status_read_does_not_invent_a_mode_change(self):
+        coordinator = _Coordinator("on")
+        coordinator._art_api.get_artmode = AsyncMock(side_effect=asyncio.TimeoutError)
+
+        data = _run(coordinator)
+
+        coordinator._art_api.get_artmode.assert_awaited_once_with()
+        self.assertEqual(data["art_mode"], "on")
 
 
 class ArtModeUnknownTest(unittest.TestCase):

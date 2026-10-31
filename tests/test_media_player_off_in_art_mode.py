@@ -1,5 +1,6 @@
 """Publish Art Mode as off while keeping modern detection and control live."""
 
+import asyncio
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -17,6 +18,7 @@ from custom_components.samsungtv_smart.const import (
 from custom_components.samsungtv_smart.media_player import SamsungTVDevice
 from custom_components.samsungtv_smart.switch import SamsungTVPowerSwitch
 from homeassistant.components.media_player import MediaPlayerState
+from tests.test_art_poll_gated_on_art_mode import _Coordinator, _update
 
 
 def _device():
@@ -56,6 +58,35 @@ async def test_modern_art_events_update_attributes_and_published_state(event, fi
         assert device.state == expected
         assert device.extra_state_attributes["art_mode_status"] == value
         assert device._state == MediaPlayerState.ON
+
+
+@pytest.mark.parametrize(
+    ("reply", "expected"),
+    [({"value": "off"}, MediaPlayerState.ON), (None, MediaPlayerState.OFF)],
+)
+async def test_status_poll_recovers_a_missing_art_off_broadcast(reply, expected):
+    """Normal viewing must recover even when the TV omits the off broadcast."""
+    device = _device()
+    device._art_api.art_mode = True
+    device._art_api._send_art_request = AsyncMock(return_value=reply)
+    # Like a Frame on HDMI, artwork reads do not answer; the mode read is
+    # independent of them and must happen before they can time out.
+    device._art_api.get_current = AsyncMock(side_effect=asyncio.TimeoutError)
+    coordinator = _Coordinator("on")
+    coordinator._art_api = device._art_api
+    coordinator._get_media_player_art_mode = lambda: device.extra_state_attributes[
+        "art_mode_status"
+    ]
+
+    await _update(coordinator)
+
+    device._art_api._send_art_request.assert_awaited_once_with(
+        {"request": "get_artmode_status"}
+    )
+    assert device.state == expected
+    assert device.extra_state_attributes["art_mode_status"] == (
+        "off" if expected == MediaPlayerState.ON else "on"
+    )
 
 
 @pytest.mark.parametrize(

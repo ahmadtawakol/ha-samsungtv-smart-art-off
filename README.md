@@ -6,6 +6,10 @@ the newer Art Mode detection, attributes, and dedicated Art Mode controls.
 Use `https://github.com/ahmadtawakol/ha-samsungtv-smart-art-off` when adding the
 custom repository in HACS.
 
+Art Mode status is refreshed while artwork is reported as active, so a missed
+Art Mode exit event cannot leave the media player relying only on its old cache.
+IP Control and panel-state detection retain priority over the Art API reply.
+
 [![HACS](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
 [![Version](https://img.shields.io/github/v/release/TheFab21/ha-samsungtv-smart?style=flat&color=blue)](https://github.com/TheFab21/ha-samsungtv-smart/releases/latest)
 [![HA Version](https://img.shields.io/badge/Home%20Assistant-%3E%3D2025.6.0-green.svg)](https://www.home-assistant.io)
