@@ -85,7 +85,13 @@ from .api.ipcontrol import (
     SamsungIPControlUnsupportedError,
 )
 from .api.samsungcast import SamsungCastTube
-from .api.samsungws import ArtModeStatus, SamsungTVAsyncRest, SamsungTVWS
+from .api.samsungws import (
+    ArtModeStatus,
+    HttpApiError,
+    ResponseError,
+    SamsungTVAsyncRest,
+    SamsungTVWS,
+)
 from .api.smartthings import SmartThingsCapabilityUnsupported, SmartThingsTV, STStatus
 from .api.upnp import SamsungUPnP
 from .art_mode_guard import (
@@ -230,6 +236,10 @@ ATTR_IP_ADDRESS = "ip_address"
 ATTR_PICTURE_MODE = "picture_mode"
 ATTR_PICTURE_MODE_LIST = "picture_mode_list"
 ATTR_CONFIG_ENTRY_ID = "config_entry_id"
+
+LAUNCHER_APP_ID = "MiniHub001.Hub"
+LAUNCHER_APP_NAME = "Launcher"
+LAUNCHER_STATUS_TIMEOUT = 2.0
 
 
 class _SkipPowerOn(Exception):
@@ -729,6 +739,8 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
     # without ever having answered, while nothing suggested art. Reset with the
     # client, like _ip_absolute_volume_supported.
     _ip_art_getter_supported: bool | None = None
+    # REST visibility is independent of Samsung's incomplete app discovery.
+    _launcher_visible: bool | None = None
 
     def __init__(
         self,
@@ -2256,6 +2268,40 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
 
         self._running_app = st_running_app or DEFAULT_APP
 
+    async def _async_update_launcher_status(self) -> None:
+        """Read the launcher's foreground visibility without launching it."""
+        if self._state != MediaPlayerState.ON or self._power_off_in_progress():
+            self._launcher_visible = None
+            return
+
+        try:
+            async with asyncio.timeout(LAUNCHER_STATUS_TIMEOUT):
+                status = await self._rest_api.async_rest_app_status(LAUNCHER_APP_ID)
+        except (
+            asyncio.TimeoutError,
+            ClientConnectionError,
+            ClientResponseError,
+            HttpApiError,
+            ResponseError,
+            ValueError,
+        ) as ex:
+            self._launcher_visible = None
+            self._log.debug("Launcher status unavailable on %s: %r", self._host, ex)
+            return
+
+        if (
+            not isinstance(status, dict)
+            or status.get("id") != LAUNCHER_APP_ID
+            or not isinstance(status.get("visible"), bool)
+        ):
+            self._launcher_visible = None
+            self._log.debug("Launcher status not reported by %s", self._host)
+            return
+
+        # A background process can remain running after an HDMI handoff.
+        # Only visible=true means the launcher is the foreground application.
+        self._launcher_visible = status["visible"]
+
     def _resolve_source_by_id(self, source_id: str) -> tuple[str, str] | None:
         """Resolve a technical source ID to (display_name, source_key).
 
@@ -2533,11 +2579,6 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
             self._source = None
             return self._source
 
-        # A running app is more specific than the physical TV input.
-        if self._running_app != DEFAULT_APP:
-            self._source = self._running_app
-            return self._source
-
         # When IP Control is paired, prefer its local getTVStates.inputSource
         # over SmartThings. Resolve HDMI1/HDMI2/... back to the configured
         # display name (e.g. "PC" / "Chromecast") so media_player.source stays
@@ -2546,9 +2587,14 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
             if resolved := self._resolve_source_by_id(local_source):
                 self._source = resolved[0]
                 return self._source
-            if self._source_list and local_source in self._source_list:
-                self._source = local_source
-                return self._source
+            self._source = local_source
+            return self._source
+
+        # App metadata is separate from the physical input. Retain the older
+        # app-as-source fallback only when no local input reading is available.
+        if self._running_app != DEFAULT_APP:
+            self._source = self._running_app
+            return self._source
 
         use_st: bool = self._st is not None and self._st.state == STStatus.STATE_ON
         if not use_st:
@@ -3074,11 +3120,13 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
                 else:
                     await self._async_select_source_delayed(self._delayed_set_source)
             await self._async_load_device_info()
+            await self._async_update_launcher_status()
             await self._update_volume_info()
             self._get_running_app()
             await self._update_media()
 
         if self._state == MediaPlayerState.OFF:
+            self._launcher_visible = None
             self._end_of_power_off = None
 
     def send_command(
@@ -3275,6 +3323,9 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
         art_on = self._art_mode_is_on()
         if art_on:
             return ART_MODE_MEDIA_TITLE
+
+        if app_name := self.app_name:
+            return app_name
 
         if self._running_app == DEFAULT_APP:
             if self._st and self._st.state != STStatus.STATE_OFF:
@@ -3525,9 +3576,9 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
         # whole time — the veto fires before the panel truth below can be
         # consulted). Gating on ON keeps the 2024-Frame fix intact, since a
         # genuinely visible foreground app only happens while the TV is on.
-        if self._state == MediaPlayerState.ON and self._running_app not in (
-            None,
-            DEFAULT_APP,
+        if self._state == MediaPlayerState.ON and (
+            self._launcher_visible is True
+            or self._running_app not in (None, DEFAULT_APP)
         ):
             return False
         if self._ip_art_mode is not None:
@@ -3705,6 +3756,8 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
     def media_content_type(self):
         """Return the content type of current playing media."""
         if self._state == MediaPlayerState.ON:
+            if self._launcher_visible is True:
+                return MediaType.APP
             if self._running_app == DEFAULT_APP:
                 if self.media_channel:
                     return MediaType.CHANNEL
@@ -3713,19 +3766,41 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
         return None
 
     @property
+    def app_name(self) -> str | None:
+        """Return the foreground app name separately from the HDMI input."""
+        if self._state != MediaPlayerState.ON:
+            return None
+        if self._launcher_visible is True:
+            return LAUNCHER_APP_NAME
+        if self._running_app not in (None, DEFAULT_APP):
+            return self._running_app
+        return None
+
+    @property
     def app_id(self):
         """ID of the current running app."""
         if self._state != MediaPlayerState.ON:
             return None
 
+        if self._launcher_visible is True:
+            return LAUNCHER_APP_ID
+
         if self._app_list_st and self._running_app != DEFAULT_APP:
             if app := self._app_list_st.get(self._running_app):
                 return app
 
+        if self._app_list and self._running_app != DEFAULT_APP:
+            if app := self._app_list.get(self._running_app):
+                return app
+
         if self._st:
-            if not self._st.channel and self._st.channel_name:
+            if (
+                not self._st.channel
+                and self._st.channel_name
+                and self._st.channel_name.lower() != "art"
+            ):
                 return self._st.channel_name
-        return DEFAULT_APP
+        return None
 
     @property
     def state(self):

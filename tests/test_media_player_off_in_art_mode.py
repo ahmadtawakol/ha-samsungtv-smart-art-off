@@ -39,6 +39,11 @@ def _device():
     )
     device._power_off_in_progress = Mock(return_value=False)
     device._get_ip_control_client = Mock(return_value=None)
+    device._rest_api = SimpleNamespace(
+        async_rest_app_status=AsyncMock(
+            return_value={"id": "MiniHub001.Hub", "visible": False}
+        )
+    )
     return device
 
 

@@ -608,13 +608,31 @@ In addition to standard media player attributes, the following are available:
 - `picture_mode`, `picture_mode_list`
 - `sound_mode`, `sound_mode_list`
 - `channel`, `channel_name`, `channel_number`
-- `app_id`, `source`, `source_list`
+- `app_name`, `app_id`, `source`, `source_list`
 - `ip_address`, `config_entry_id`
 - `screen_resolution` — the panel's native resolution (e.g. `3840x2160`), used
   to fit uploaded images to the screen
 - `art_mode_status` — `on` or `off` on Frame TVs; **absent** when the TV is in
   standby. See [Detecting Art Mode vs. watching TV](#detecting-art-mode-vs-watching-tv)
 - `frame_art_last_result` — outcome of the last Frame Art service call
+
+### Launcher detection and HDMI source
+
+This fork automatically checks the custom launcher `MiniHub001.Hub` while the
+TV is powered on. When the TV reports the launcher as visible in the foreground:
+
+- `app_name` is `Launcher`.
+- `app_id` is `MiniHub001.Hub`.
+- The media title is `Launcher`.
+- `source` stays the physical input reported by IP Control, such as `Apple TV`
+  for HDMI 2. Other native app names are also kept separate from this local input.
+
+A launcher that is still running in the background is not reported as the
+current app. Failed or invalid status reads clear its app metadata; power and
+input reporting continue. These checks use the existing TV REST connection with
+a two-second timeout and do not launch, install, or modify the launcher. No
+manual app-list entry is required. Art Mode continues to report the media player
+as off.
 
 ### Detecting Art Mode vs. watching TV
 
