@@ -85,7 +85,13 @@ from .api.ipcontrol import (
     SamsungIPControlUnsupportedError,
 )
 from .api.samsungcast import SamsungCastTube
-from .api.samsungws import ArtModeStatus, SamsungTVAsyncRest, SamsungTVWS
+from .api.samsungws import (
+    ArtModeStatus,
+    HttpApiError,
+    ResponseError,
+    SamsungTVAsyncRest,
+    SamsungTVWS,
+)
 from .api.smartthings import SmartThingsCapabilityUnsupported, SmartThingsTV, STStatus
 from .api.upnp import SamsungUPnP
 from .art_mode_guard import (
@@ -133,7 +139,9 @@ from .const import (
     CONF_OAUTH_TOKEN,
     CONF_PING_PORT,
     CONF_POWER_ON_METHOD,
+    CONF_REST_APP_LIST,
     CONF_REST_PORT,
+    CONF_SEPARATE_APP_SOURCE,
     CONF_SHOW_CHANNEL_NR,
     CONF_SLIDESHOW_API,
     CONF_SOURCE_LIST,
@@ -157,6 +165,8 @@ from .const import (
     DATA_OPTIONS,
     DEFAULT_APP,
     DEFAULT_PORT,
+    DEFAULT_REST_APP_LIST,
+    DEFAULT_SEPARATE_APP_SOURCE,
     DEFAULT_SOURCE_LIST,
     DEFAULT_ST_POLL_ON_INTERVAL,
     DEFAULT_TIMEOUT,
@@ -230,6 +240,8 @@ ATTR_IP_ADDRESS = "ip_address"
 ATTR_PICTURE_MODE = "picture_mode"
 ATTR_PICTURE_MODE_LIST = "picture_mode_list"
 ATTR_CONFIG_ENTRY_ID = "config_entry_id"
+
+REST_APP_STATUS_TIMEOUT = 2.0
 
 
 class _SkipPowerOn(Exception):
@@ -733,6 +745,11 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
     # without ever having answered, while nothing suggested art. Reset with the
     # client, like _ip_absolute_volume_supported.
     _ip_art_getter_supported: bool | None = None
+    _rest_app_list: dict[str, str] | None = None
+    _rest_app_name: str | None = None
+    _rest_app_id: str | None = None
+    _rest_app_next_index = 0
+    _separate_app_source = False
 
     def __init__(
         self,
@@ -1925,6 +1942,14 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
     def _update_config_options(self, first_load=False):
         """Update config options."""
         self._load_tv_lists(first_load)
+        rest_apps = self._get_option(CONF_REST_APP_LIST, DEFAULT_REST_APP_LIST)
+        if rest_apps != self._rest_app_list:
+            self._rest_app_list = dict(rest_apps) if isinstance(rest_apps, dict) else {}
+            self._rest_app_name = self._rest_app_id = None
+            self._rest_app_next_index = 0
+        self._separate_app_source = self._get_option(
+            CONF_SEPARATE_APP_SOURCE, DEFAULT_SEPARATE_APP_SOURCE
+        )
         self._use_st_status = self._get_option(CONF_USE_ST_STATUS_INFO, True)
         self._use_channel_info = self._get_option(CONF_USE_ST_CHANNEL_INFO, True)
         self._st_poll_on_interval = self._get_option(
@@ -2260,6 +2285,53 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
 
         self._running_app = st_running_app or DEFAULT_APP
 
+    async def _async_update_rest_app_status(self) -> None:
+        apps = (
+            self._rest_app_list
+            if self._rest_app_list is not None
+            else DEFAULT_REST_APP_LIST
+        )
+        if (
+            not apps
+            or self._state != MediaPlayerState.ON
+            or self._power_off_in_progress()
+        ):
+            self._rest_app_name = self._rest_app_id = None
+            return
+
+        entries = list(apps.items())
+        start = self._rest_app_next_index % len(entries)
+        found_name = found_id = None
+        try:
+            async with asyncio.timeout(REST_APP_STATUS_TIMEOUT):
+                for offset in range(len(entries)):
+                    index = (start + offset) % len(entries)
+                    name, app_id = entries[index]
+                    # Advance before awaiting so one timeout doesn't starve the other apps.
+                    self._rest_app_next_index = (index + 1) % len(entries)
+                    try:
+                        status = await self._rest_api.async_rest_app_status(app_id)
+                    except (
+                        ClientConnectionError,
+                        ClientResponseError,
+                        HttpApiError,
+                        ResponseError,
+                        ValueError,
+                    ) as ex:
+                        self._log.debug("REST app status unavailable: %r", ex)
+                        continue
+                    if (
+                        isinstance(status, dict)
+                        and status.get("id") == app_id
+                        and status.get("visible") is True
+                    ):
+                        found_name, found_id = name, app_id
+                        return
+        except asyncio.TimeoutError:
+            self._log.debug("REST app status polling budget expired")
+        finally:
+            self._rest_app_name, self._rest_app_id = found_name, found_id
+
     def _resolve_source_by_id(self, source_id: str) -> tuple[str, str] | None:
         """Resolve a technical source ID to (display_name, source_key).
 
@@ -2538,7 +2610,7 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
             return self._source
 
         # A running app is more specific than the physical TV input.
-        if self._running_app != DEFAULT_APP:
+        if not self._separate_app_source and self._running_app != DEFAULT_APP:
             self._source = self._running_app
             return self._source
 
@@ -2550,9 +2622,15 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
             if resolved := self._resolve_source_by_id(local_source):
                 self._source = resolved[0]
                 return self._source
-            if self._source_list and local_source in self._source_list:
+            if self._separate_app_source or (
+                self._source_list and local_source in self._source_list
+            ):
                 self._source = local_source
                 return self._source
+
+        if self._running_app != DEFAULT_APP:
+            self._source = self._running_app
+            return self._source
 
         use_st: bool = self._st is not None and self._st.state == STStatus.STATE_ON
         if not use_st:
@@ -3076,11 +3154,13 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
                 else:
                     await self._async_select_source_delayed(self._delayed_set_source)
             await self._async_load_device_info()
+            await self._async_update_rest_app_status()
             await self._update_volume_info()
             self._get_running_app()
             await self._update_media()
 
         if self._state == MediaPlayerState.OFF:
+            self._rest_app_name = self._rest_app_id = None
             self._end_of_power_off = None
 
     def send_command(
@@ -3277,6 +3357,9 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
         art_on = self._art_mode_is_on()
         if art_on:
             return ART_MODE_MEDIA_TITLE
+
+        if app_name := self.app_name:
+            return app_name
 
         if self._running_app == DEFAULT_APP:
             if self._st and self._st.state != STStatus.STATE_OFF:
@@ -3527,9 +3610,9 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
         # whole time — the veto fires before the panel truth below can be
         # consulted). Gating on ON keeps the 2024-Frame fix intact, since a
         # genuinely visible foreground app only happens while the TV is on.
-        if self._state == MediaPlayerState.ON and self._running_app not in (
-            None,
-            DEFAULT_APP,
+        if self._state == MediaPlayerState.ON and (
+            self._rest_app_id is not None
+            or self._running_app not in (None, DEFAULT_APP)
         ):
             return False
         if self._ip_art_mode is not None:
@@ -3707,6 +3790,8 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
     def media_content_type(self):
         """Return the content type of current playing media."""
         if self._state == MediaPlayerState.ON:
+            if self._rest_app_id is not None:
+                return MediaType.APP
             if self._running_app == DEFAULT_APP:
                 if self.media_channel:
                     return MediaType.CHANNEL
@@ -3715,19 +3800,43 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
         return None
 
     @property
+    def app_name(self) -> str | None:
+        if self._state != MediaPlayerState.ON:
+            return None
+        if self._rest_app_id is not None:
+            return self._rest_app_name
+        if self._running_app not in (None, DEFAULT_APP):
+            return self._running_app
+        return None
+
+    @property
     def app_id(self):
         """ID of the current running app."""
         if self._state != MediaPlayerState.ON:
             return None
 
+        if self._rest_app_id is not None:
+            return self._rest_app_id
+
         if self._app_list_st and self._running_app != DEFAULT_APP:
             if app := self._app_list_st.get(self._running_app):
                 return app
 
+        if self._app_list and self._running_app != DEFAULT_APP:
+            if app := self._app_list.get(self._running_app):
+                return app
+
         if self._st:
-            if not self._st.channel and self._st.channel_name:
+            if (
+                not self._st.channel
+                and self._st.channel_name
+                and (
+                    not self._separate_app_source
+                    or self._st.channel_name.lower() != "art"
+                )
+            ):
                 return self._st.channel_name
-        return DEFAULT_APP
+        return None if self._separate_app_source else DEFAULT_APP
 
     @property
     def state(self):

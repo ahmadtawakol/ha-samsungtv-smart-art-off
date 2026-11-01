@@ -598,13 +598,30 @@ In addition to standard media player attributes, the following are available:
 - `picture_mode`, `picture_mode_list`
 - `sound_mode`, `sound_mode_list`
 - `channel`, `channel_name`, `channel_number`
-- `app_id`, `source`, `source_list`
+- `app_name`, `app_id`, `source`, `source_list`
 - `ip_address`, `config_entry_id`
 - `screen_resolution` — the panel's native resolution (e.g. `3840x2160`), used
   to fit uploaded images to the screen
 - `art_mode_status` — `on` or `off` on Frame TVs; **absent** when the TV is in
   standby. See [Detecting Art Mode vs. watching TV](#detecting-art-mode-vs-watching-tv)
 - `frame_art_last_result` — outcome of the last Frame Art service call
+
+### Additional app detection
+
+Use **Additional apps to detect** in Advanced Options for apps missing from the
+TV's app list. Enter each app's name and native Tizen app ID, for example:
+
+```yaml
+Video player: com.example.player
+Browser: com.example.browser
+```
+
+An empty list adds no extra requests. Configured apps count as current only when
+the TV reports them as visible. Checks share a two-second limit, move past apps
+that do not answer, and clear the old app name when no visible app is found.
+
+**Keep input source separate from apps** keeps the input in `source` and reports
+the app through `app_name` and `app_id`. This option is off by default.
 
 ### Detecting Art Mode vs. watching TV
 
