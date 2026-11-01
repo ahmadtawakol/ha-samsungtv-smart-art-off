@@ -1545,18 +1545,27 @@ class SamsungTVPowerSwitch(SwitchEntity):
         self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        """Turn the TV off.
+        """Prefer explicit power-off commands; KEY_POWER can toggle Art Mode."""
+        ip_control = self._get_ip_control()
+        if ip_control is not None:
+            try:
+                await ip_control.async_power_off()
+                self._set_optimistic(False)
+                self._log.debug("Power switch: TV turned off via IP Control")
+                return
+            except SamsungIPControlAuthError as ex:
+                self._log.warning(
+                    "Power switch: IP Control token rejected (%s) — re-pair via "
+                    "the integration options; falling back to SmartThings",
+                    ex,
+                )
+            except SamsungIPControlError as ex:
+                self._log.debug(
+                    "Power switch: IP Control turn_off failed (%s), "
+                    "falling back to SmartThings",
+                    ex,
+                )
 
-        Priority:
-        - SmartThings configured → Command.OFF (hardware-level, works regardless
-          of TV state including Art Mode).
-        - IP Control paired → powerOff via JSON-RPC (explicit, works from Art
-          Mode, no cloud, future-proof if Samsung disables the WebSocket ports).
-        - Otherwise → media_player.turn_off (KEY_POWER over WebSocket). Note that
-          on Frame TVs this only toggles between viewing and Art Mode rather than
-          issuing a true power-off — which is exactly why the paths above are
-          preferred when available.
-        """
         if self._device_id:
             # SmartThings path — bypasses HA state entirely
             try:
@@ -1578,27 +1587,6 @@ class SamsungTVPowerSwitch(SwitchEntity):
             except Exception as ex:
                 self._log.warning(
                     "Power switch: SmartThings turn_off failed (%s), falling back",
-                    ex,
-                )
-
-        # IP Control path — explicit power-off, works from Art Mode.
-        ip_control = self._get_ip_control()
-        if ip_control is not None:
-            try:
-                await ip_control.async_power_off()
-                self._set_optimistic(False)
-                self._log.debug("Power switch: TV turned off via IP Control")
-                return
-            except SamsungIPControlAuthError as ex:
-                self._log.warning(
-                    "Power switch: IP Control token rejected (%s) — re-pair via "
-                    "the integration options; falling back to WebSocket",
-                    ex,
-                )
-            except SamsungIPControlError as ex:
-                self._log.debug(
-                    "Power switch: IP Control turn_off failed (%s), "
-                    "falling back to WebSocket",
                     ex,
                 )
 
