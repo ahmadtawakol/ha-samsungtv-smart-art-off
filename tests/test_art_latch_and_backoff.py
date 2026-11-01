@@ -51,7 +51,7 @@ class RunningAppVetoTest(unittest.TestCase):
         # Order is unchanged for a TV that is ON: a visible app still wins over
         # a spurious art_mode_changed (the 2024-Frame fix this guard exists for).
         veto = self.block.index("self._running_app not in (")
-        panel = self.block.index("panel_art = self._ip_control_panel_art_cached()")
+        panel = self.block.index("shared = self._shared_panel_art_state()")
         self.assertLess(veto, panel)
 
     def test_an_off_tv_reaches_the_panel_truth(self):

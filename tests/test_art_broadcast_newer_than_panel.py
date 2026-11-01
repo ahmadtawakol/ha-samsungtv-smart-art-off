@@ -57,15 +57,15 @@ def _device(*, picture_mode, polled_at, broadcast):
     """A Frame whose only readable signals are the panel snapshot and the art API.
 
     The scenarios below are written on a synthetic t=100 timeline. Rebase it
-    onto time.monotonic() with the broadcast anchored at "just now", which is
+    onto time.monotonic() with the latest observation anchored at "just now", which is
     what every one of them means: _art_broadcast_overrides bounds the override
     in wall-clock terms as well since 8.12.6 (a broadcast older than
     ART_BROADCAST_GRACE stops outranking a reading that is not coming), and a
     literal 104.4 is hours old against a real monotonic clock. Left as bare
     literals these cases passed or failed on the host's uptime.
     """
-    origin = time.monotonic() - (
-        broadcast[1] if broadcast is not None else (polled_at or 0.0)
+    origin = time.monotonic() - max(
+        broadcast[1] if broadcast is not None else 0.0, polled_at or 0.0
     )
     if polled_at is not None:
         polled_at = origin + polled_at
@@ -73,6 +73,9 @@ def _device(*, picture_mode, polled_at, broadcast):
         broadcast = (broadcast[0], origin + broadcast[1])
     device = object.__new__(SamsungTVDevice)
     device._entry_id = ENTRY_ID
+    device._device_info = {"device": {"FrameTVSupport": "true", "PowerState": "on"}}
+    device._device_info_at = None
+    device._st = None
     device._state = MediaPlayerState.OFF  # a Frame showing art reports OFF
     device._running_app = DEFAULT_APP
     device._ip_art_mode = None  # art-mode option off, as on the measured TV
@@ -80,9 +83,15 @@ def _device(*, picture_mode, polled_at, broadcast):
     snapshot = {"tv": {"pictureMode": picture_mode}, "powered_off": False}
     if polled_at is not None:
         snapshot["polled_at"] = polled_at
-    device._get_ip_control_state_coordinator = lambda: SimpleNamespace(data=snapshot)
+    device._get_ip_control_state_coordinator = lambda: SimpleNamespace(
+        data=snapshot, last_update_success=True
+    )
     art_api = SimpleNamespace(art_mode_last_broadcast=broadcast, art_mode=None)
-    device.hass = SimpleNamespace(data={DOMAIN: {ENTRY_ID: {DATA_ART_API: art_api}}})
+    entry = SimpleNamespace(data={"ip_control_token": "synthetic"}, options={})
+    device.hass = SimpleNamespace(
+        data={DOMAIN: {ENTRY_ID: {DATA_ART_API: art_api}}},
+        config_entries=SimpleNamespace(async_get_entry=lambda _: entry),
+    )
     return device
 
 
@@ -122,9 +131,10 @@ def test_without_a_broadcast_the_panel_decides():
     assert device._art_mode_is_on() is False
 
 
-def test_a_snapshot_without_a_request_time_keeps_the_previous_behaviour():
+def test_a_snapshot_without_a_request_time_uses_the_existing_fallback():
     device = _device(picture_mode="Dynamic", polled_at=None, broadcast=(True, 104.4))
-    assert device._art_mode_is_on() is False
+    assert device._shared_panel_art_state() is None
+    assert device._art_mode_is_on() is True
 
 
 def test_a_status_reply_is_not_a_broadcast():

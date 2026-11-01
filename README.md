@@ -606,6 +606,17 @@ In addition to standard media player attributes, the following are available:
   standby. See [Detecting Art Mode vs. watching TV](#detecting-art-mode-vs-watching-tv)
 - `frame_art_last_result` — outcome of the last Frame Art service call
 
+### Art Mode status from the shared local response
+
+The Art sensor and media player use the IP Control status already collected.
+On a Frame, `pictureMode: Ambient` means artwork; a normal picture mode means
+normal viewing.
+
+If that status cannot be used, the extra Art API fallback runs at most once
+every five minutes. A missed change may therefore take several minutes to show
+up on TVs without reliable local status. Recent mode-change events are still
+trusted briefly while the next poll catches up.
+
 ### Detecting Art Mode vs. watching TV
 
 A Frame is a **tri-state** device — standby, Art Mode, or actually being

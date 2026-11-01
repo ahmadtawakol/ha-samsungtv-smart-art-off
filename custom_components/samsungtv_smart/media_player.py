@@ -93,6 +93,11 @@ from .art_mode_guard import (
     guard_for,
     settle_after_source_switch,
 )
+from .art_mode_state import (
+    ART_BROADCAST_GRACE,
+    art_broadcast_override,
+    shared_panel_art_mode,
+)
 from .const import (
     ART_APP_ID,
     ATTR_ART_PICTURE_MODE,
@@ -128,6 +133,7 @@ from .const import (
     CONF_IP_CONTROL_ART_MODE,
     CONF_IP_CONTROL_FW_VERSION,
     CONF_IP_CONTROL_MODEL_ID,
+    CONF_IP_CONTROL_POLL_INTERVAL,
     CONF_IP_CONTROL_TOKEN,
     CONF_LOGO_OPTION,
     CONF_OAUTH_TOKEN,
@@ -156,6 +162,7 @@ from .const import (
     DATA_IP_CONTROL_STATE_COORDINATOR,
     DATA_OPTIONS,
     DEFAULT_APP,
+    DEFAULT_IP_CONTROL_POLL_INTERVAL,
     DEFAULT_PORT,
     DEFAULT_SOURCE_LIST,
     DEFAULT_ST_POLL_ON_INTERVAL,
@@ -368,11 +375,6 @@ IP_ART_MODE_MAX_FAILURES = 3
 # duplicated timer. The trigger is still unidentified; this caps the cost of
 # it and logs each skip so the next capture shows the real rate.
 IP_ART_MODE_MIN_INTERVAL = IP_ART_MODE_REFRESH_INTERVAL.total_seconds() * 0.8
-# How long after an art_mode_changed broadcast an IP Control reading that
-# disagrees with it is taken for lag rather than a conflict (seconds). A 2023
-# Frame's getTVStates had not reached "Ambient" 11 s after it broadcast ON; the
-# switch gives the panel the same 20 s (ART_MODE_PANEL_CONFLICT_WINDOW).
-ART_BROADCAST_GRACE = 20.0
 # How long device info has to go unanswered, on a TV we do not believe to be
 # on, before the set counts as off the network entirely (seconds). A Frame
 # displaying artwork is powered up and answers the REST endpoint — the #326
@@ -733,6 +735,9 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
     # without ever having answered, while nothing suggested art. Reset with the
     # client, like _ip_absolute_volume_supported.
     _ip_art_getter_supported: bool | None = None
+    _shared_ip_coordinator: Any | None = None
+    _shared_ip_unsub: Callable[[], None] | None = None
+    _ip_power_off_observed_at: float | None = None
 
     def __init__(
         self,
@@ -1468,26 +1473,6 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
         return self._ip_control_client
 
     def _on_art_transition(self) -> None:
-        """Confirm Art Mode via IP immediately on an art-channel transition.
-
-        The IP Control ``getTVStates.pictureMode`` read is the authoritative
-        panel state, but it is otherwise only polled every
-        ``IP_ART_MODE_REFRESH_INTERVAL`` (5 s). When the async art channel
-        broadcasts a transition (art_mode_changed / go_to_standby), refresh the
-        IP cache straight away so ``art_mode_status`` — and the switch that
-        mirrors it — reflects reality within ~1 s rather than up to 5 s. This
-        is what keeps the switch from flapping back after a state change. The
-        callback fires from the art receive loop (the event loop), so
-        scheduling a task is safe; ``_refresh_ip_art_mode`` no-ops for TVs that
-        are not IP-paired.
-
-        On TVs without IP Control, ``art_api.art_mode`` (read directly by
-        ``extra_state_attributes``) was just updated by the same event, but
-        nothing publishes that change until the next polled update — up to
-        ``SCAN_INTERVAL`` (5 s) later, and the Art Mode switch may poll in
-        between and read the stale value. Write state immediately so the new
-        ``art_mode_status`` is visible right away.
-        """
         self.async_write_ha_state()
         self.hass.async_create_task(self._refresh_ip_art_mode(force=True))
         # Some models (e.g. 2024 Frames where IP Control cannot report the art
@@ -1500,23 +1485,7 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
             self.async_schedule_update_ha_state(True)
 
     async def _refresh_ip_art_mode(self, _now=None, *, force: bool = False) -> None:
-        """Refresh the cached Art Mode value, at most one at a time.
-
-        Every read here costs two serialized IP Control round-trips
-        (powerControl, then artModeControl), so overlapping or near-duplicate
-        refreshes crowd out the user-initiated writes that share the host gate
-        — which is how a single wake turned into 90 refreshes in 46 s on the
-        #319 Frame. One runs at a time; a periodic one that follows another
-        too closely is dropped.
-
-        ``force`` is for the two callers whose whole point is immediacy: the
-        art-channel transition hook, which exists so the switch reflects a
-        transition within ~1 s instead of up to 5 (#326), and the eager read
-        at startup. It bypasses the interval but not the in-flight guard; a
-        forced request arriving while a refresh runs is replayed once that one
-        finishes, so the transition is never answered by a reading taken
-        before it.
-        """
+        """Serialize Art Mode reads; replay forced calls after any active read."""
         if self._ip_art_mode_refreshing:
             if force:
                 self._ip_art_mode_refresh_again = True
@@ -1587,6 +1556,8 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
           IP_ART_MODE_MAX_FAILURES consecutive failures the cache is cleared
           so a TV that stays unreachable cannot pin a stale value forever.
         """
+        if self._apply_shared_panel_art_state():
+            return
         client = self._get_ip_control_client()
         if client is None:
             # Un-paired, or the IP Control channel was disabled in options.
@@ -1707,6 +1678,7 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
         self._ip_art_mode_failures = 0
         self._clear_ip_control_token_problem()
         self._ip_art_mode_at = None if power == "powerOff" else read_at
+        self._ip_power_off_observed_at = read_at if power == "powerOff" else None
         if value != self._ip_art_mode:
             self._log.debug(
                 "IP Control art-mode for %s changed: %s -> %s (writing state)",
@@ -1773,6 +1745,7 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
     async def async_added_to_hass(self):
         """Set config parameter when add to hass."""
         await super().async_added_to_hass()
+        self._attach_shared_ip_listener()
 
         # this will update config options when changed
         self.async_on_remove(
@@ -1852,6 +1825,7 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
 
     async def async_will_remove_from_hass(self):
         """Run when entity will be removed from hass."""
+        self._detach_shared_ip_listener()
         if self._ip_art_mode_initial_task is not None:
             self._ip_art_mode_initial_task.cancel()
             self._ip_art_mode_initial_task = None
@@ -2395,6 +2369,84 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
             .get(self._entry_id, {})
             .get(DATA_IP_CONTROL_STATE_COORDINATOR)
         )
+
+    def _active_shared_ip_entry(self) -> ConfigEntry | None:
+        hass = getattr(self, "hass", None)
+        entries = getattr(hass, "config_entries", None)
+        entry_id = getattr(self, "_entry_id", None)
+        if entries is None or entry_id is None:
+            return None
+        entry = entries.async_get_entry(entry_id)
+        if (
+            entry is None
+            or not entry.data.get(CONF_IP_CONTROL_TOKEN)
+            or not entry.options.get(CONF_ENABLE_IP_CONTROL, True)
+        ):
+            return None
+        return entry
+
+    def _shared_panel_art_state(self) -> tuple[bool, float] | None:
+        entry = self._active_shared_ip_entry()
+        if entry is None or self.support_art_mode == ArtModeSupport.UNSUPPORTED:
+            return None
+        reading = shared_panel_art_mode(
+            self._get_ip_control_state_coordinator(),
+            now=time.monotonic(),
+            poll_interval=entry.options.get(
+                CONF_IP_CONTROL_POLL_INTERVAL, DEFAULT_IP_CONTROL_POLL_INTERVAL
+            ),
+        )
+        if (
+            reading is not None
+            and self._ip_art_mode is False
+            and self._ip_art_mode_at is None
+            and self._ip_power_off_observed_at is not None
+            and self._ip_power_off_observed_at >= reading[1]
+        ):
+            # Ignore poll results that predate a confirmed power-off.
+            return None
+        return reading
+
+    def _apply_shared_panel_art_state(self) -> bool:
+        reading = self._shared_panel_art_state()
+        if reading is None:
+            return False
+        mode, observed_at = reading
+        changed = mode != self._ip_art_mode or observed_at != self._ip_art_mode_at
+        self._ip_art_mode, self._ip_art_mode_at = mode, observed_at
+        self._ip_power_off_observed_at = None
+        self._ip_art_mode_failures = 0
+        if changed:
+            self.async_write_ha_state()
+        return True
+
+    @callback
+    def _shared_ip_updated(self) -> None:
+        if not self._apply_shared_panel_art_state():
+            self.async_write_ha_state()
+
+    def _attach_shared_ip_listener(self) -> None:
+        """Allow late sensor setup to supply the shared coordinator."""
+        coordinator = (
+            self._get_ip_control_state_coordinator()
+            if self._active_shared_ip_entry() is not None
+            else None
+        )
+        if coordinator is self._shared_ip_coordinator:
+            return
+        self._detach_shared_ip_listener()
+        if coordinator is not None and hasattr(coordinator, "async_add_listener"):
+            self._shared_ip_coordinator = coordinator
+            self._shared_ip_unsub = coordinator.async_add_listener(
+                self._shared_ip_updated
+            )
+            self._shared_ip_updated()
+
+    def _detach_shared_ip_listener(self) -> None:
+        if self._shared_ip_unsub is not None:
+            self._shared_ip_unsub()
+        self._shared_ip_unsub = None
+        self._shared_ip_coordinator = None
 
     def _ip_control_panel_art_cached(self) -> bool | None:
         """Tri-state art state from the cached getTVStates snapshot.
@@ -3005,6 +3057,7 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
 
     async def _async_update(self):
         """Perform the actual state update."""
+        self._attach_shared_ip_listener()
 
         # Refresh OAuth token if needed (before any SmartThings API call)
         if self._auth_method == AUTH_METHOD_OAUTH:
@@ -3474,15 +3527,12 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
         """
         if observed_at is None:
             return None
-        broadcast = self._latest_art_broadcast()
-        if broadcast is None:
-            return None
-        art_on, heard_at = broadcast
-        if observed_at >= heard_at + ART_BROADCAST_GRACE:
-            return None
-        if time.monotonic() >= heard_at + ART_BROADCAST_GRACE:
-            return None
-        return art_on
+        return art_broadcast_override(
+            observed_at,
+            self._latest_art_broadcast(),
+            now=time.monotonic(),
+            grace=ART_BROADCAST_GRACE,
+        )
 
     def _art_mode_is_on(self) -> bool | None:
         """Return the authoritative local Art Mode state, or None if unknown.
@@ -3532,41 +3582,17 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
             DEFAULT_APP,
         ):
             return False
+        # A missing timestamp here marks a confirmed power-off.
+        if self._ip_art_mode is False and self._ip_art_mode_at is None:
+            return False
+        shared = self._shared_panel_art_state()
+        if shared is not None:
+            mode, observed_at = shared
+            override = self._art_broadcast_overrides(observed_at)
+            return mode if override is None else override
         if self._ip_art_mode is not None:
             override = self._art_broadcast_overrides(self._ip_art_mode_at)
             return self._ip_art_mode if override is None else override
-        # Without an IP reading (not paired, the read failing — or, until
-        # 8.10.0, the art-mode option off, which then gated the getter too)
-        # _ip_art_mode is None, and the value used to come from the WebSocket
-        # art channel — which on some Frames never receives the
-        # art_mode_changed event and freezes art_mode_status at its
-        # pre-transition value for hours (#248: measured 4 stretches of 7-10 h,
-        # art shown but the attribute stuck at off). The cached
-        # getTVStates.pictureMode is the panel's own truth, refreshed every IP
-        # Control poll and independent of that option, so consult it before
-        # the WS/SmartThings fallbacks. None = not readable -> fall
-        # through unchanged (no IP Control, no snapshot, or TV asleep).
-        #
-        # Frame TVs only: pictureMode 'Ambient' means artwork on an LS03 Frame,
-        # but Samsung's unrelated Ambient Mode on a non-Frame set (e.g. QN90A)
-        # reports the same value, and those panels sit in it near-permanently.
-        # Without this guard art_mode_status would read 'on' for a TV that has
-        # no Art Mode at all (#248). support_art_mode already folds the WS
-        # artmode capability and the FrameTVSupport device flag, so it is the
-        # right gate; a non-Frame falls through to the previous behaviour.
-        #
-        # The snapshot is as old as the last poll, though, and the panel can
-        # trail an art_mode_changed broadcast: see _art_broadcast_overrides.
-        panel_art = self._ip_control_panel_art_cached()
-        if (
-            panel_art is not None
-            and self.support_art_mode != ArtModeSupport.UNSUPPORTED
-        ):
-            data = getattr(self._get_ip_control_state_coordinator(), "data", None)
-            override = self._art_broadcast_overrides(
-                data.get("polled_at") if isinstance(data, dict) else None
-            )
-            return panel_art if override is None else override
         if self._get_device_spec("PowerState") == "standby":
             # Like the IP Control readings above, this is a snapshot and can
             # trail the TV's own art_mode_changed announcement. On a Frame with

@@ -51,6 +51,7 @@ from .api.ipcontrol import (
     SamsungIPControlTransportError,
     SamsungIPControlUnsupportedError,
 )
+from .art_mode_state import art_broadcast_override, shared_panel_art_mode
 from .const import (
     ART_IDENTIFY_DEBOUNCE,
     CONF_API_KEY,
@@ -269,6 +270,8 @@ SCAN_INTERVAL = timedelta(seconds=15)
 # The heavier get_content_list call is throttled separately
 # (CONF_CONTENT_LIST_INTERVAL), so this short cadence stays cheap.
 FRAME_ART_SCAN_INTERVAL = timedelta(seconds=5)
+# Fall back slowly when local status and mode-change events are missing.
+ART_MODE_STATUS_RECHECK_INTERVAL = 300.0
 
 
 async def async_setup_entry(  # noqa: C901
@@ -714,6 +717,7 @@ class FrameArtCoordinator(DataUpdateCoordinator):
         self._connection_failures = 0
         self._max_connection_failures = 5
         self._backoff_until: float | None = None
+        self._art_status_last_attempt: float | None = None
 
         self._log.info(
             "Frame Art Coordinator initialized with thumbnail fetching enabled"
@@ -821,7 +825,8 @@ class FrameArtCoordinator(DataUpdateCoordinator):
         }
 
         # FIRST: Check if TV is powered off
-        if self._is_tv_powered_off():
+        shared_status = self._shared_panel_art_status()
+        if shared_status is None and self._is_tv_powered_off():
             self._log.debug("Frame Art: TV is powered off, returning minimal data")
             data["tv_powered_off"] = True
             data["art_mode"] = "off"
@@ -841,41 +846,34 @@ class FrameArtCoordinator(DataUpdateCoordinator):
             return data
 
         try:
-            # First, try to get art_mode from media_player state (more reliable)
-            # This avoids double API calls and keeps sensor in sync with media_player
             media_player_art_mode = self._get_media_player_art_mode()
-            if media_player_art_mode is not None:
+            if shared_status is not None:
+                # The media player may still be behind this shared reading.
+                data["art_mode"] = shared_status
+            elif media_player_art_mode is not None:
                 data["art_mode"] = media_player_art_mode
                 self._log.debug(
                     "Frame Art: Using media_player art_mode_status: %s",
                     media_player_art_mode,
                 )
             else:
-                # Fallback to direct API call if media_player state not available
+                cached = getattr(self._art_api, "art_mode", None)
+                if isinstance(cached, bool):
+                    data["art_mode"] = "on" if cached else "off"
+            if self._should_refresh_art_status(media_player_art_mode):
                 try:
                     async with asyncio.timeout(8):
                         art_mode = await self._art_api.get_artmode()
-                        data["art_mode"] = art_mode
+                        if media_player_art_mode is None:
+                            data["art_mode"] = art_mode
                         self._log.debug("Frame Art: Direct API art_mode: %s", art_mode)
                 except asyncio.TimeoutError:
                     self._log.debug("Timeout getting art mode status")
                 except Exception as ex:
                     self._log.debug("Error getting art mode: %s", ex)
 
-            # Art-only reads are pointless while the TV is not showing art, and
-            # they are not free. On a Frame sitting on an input (HDMI) the art app
-            # answers get_artmode_status but stays silent on get_current_artwork
-            # and on the slideshow reads, so every 5 s cycle piled up two 5 s
-            # timeouts. Three consecutive ones trip the art channel's wedge
-            # breaker (ART_WS_TIMEOUT_TRIP), which force-closes a socket that is
-            # demonstrably answering: 14 reconnects in 70 min measured on a
-            # 13-TV fleet, none of which fixed anything because nothing was
-            # broken (#273). Neither the current artwork nor the slideshow state
-            # can change while art mode is off, so skip those reads and keep the
-            # values already published. get_artmode() above is still polled every
-            # cycle: it is the request the TV does answer, and it is what tells
-            # us when to resume. Only a positive "off" skips — an unknown reading
-            # (None, e.g. the media_player state is not up yet) still polls.
+            # Artwork requests can time out on normal inputs and trigger reconnects.
+            # Keep polling them only while the mode is on or unknown.
             art_mode_off = data["art_mode"] == "off"
             if art_mode_off and self.data:
                 self._log.debug(
@@ -1138,6 +1136,54 @@ class FrameArtCoordinator(DataUpdateCoordinator):
                 self._thumbnail_failures = 0
 
         return data
+
+    def _shared_panel_art_status(self) -> str | None:
+        if not _ip_control_active(self._entry):
+            return None
+        coordinator = (
+            self._hass.data.get(DOMAIN, {})
+            .get(self._entry.entry_id, {})
+            .get(DATA_IP_CONTROL_STATE_COORDINATOR)
+        )
+        now = time.monotonic()
+        reading = shared_panel_art_mode(
+            coordinator, now=now, poll_interval=_ip_control_poll_interval(self._entry)
+        )
+        if reading is None:
+            return None
+        mode, observed_at = reading
+        override = art_broadcast_override(
+            observed_at,
+            getattr(self._art_api, "art_mode_last_broadcast", None),
+            now=now,
+        )
+        return "on" if (mode if override is None else override) else "off"
+
+    def _should_refresh_art_status(self, published_status: str | None) -> bool:
+        if published_status == "off":
+            return False
+        if self._shared_panel_art_status() is not None:
+            return False
+
+        now = time.monotonic()
+        last_observation = getattr(self, "_art_status_last_attempt", None)
+        broadcast = getattr(self._art_api, "art_mode_last_broadcast", None)
+        if (
+            isinstance(broadcast, (tuple, list))
+            and len(broadcast) == 2
+            and isinstance(broadcast[1], (int, float))
+            and 0 <= now - broadcast[1] < ART_MODE_STATUS_RECHECK_INTERVAL
+        ):
+            last_observation = max(last_observation or broadcast[1], broadcast[1])
+        if (
+            last_observation is not None
+            and 0 <= now - last_observation < ART_MODE_STATUS_RECHECK_INTERVAL
+        ):
+            return False
+
+        # Failed attempts count toward the fallback interval too.
+        self._art_status_last_attempt = now
+        return True
 
     def _is_tv_powered_off(self) -> bool:
         """Check if the TV (media_player) is powered off.

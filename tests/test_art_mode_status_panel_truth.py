@@ -7,8 +7,8 @@ reported pictureMode 'Ambient', but the attribute stayed 'off' because
 _art_mode_is_on() only consulted the WebSocket art channel, which never
 received the change event.
 
-_art_mode_is_on now reads the cached getTVStates.pictureMode (tri-state) after
-the IP flag cache and before the WS/SmartThings fallbacks. media_player.py is
+_art_mode_is_on reads fresh shared getTVStates.pictureMode (tri-state) before
+the cached IP flag and WS/SmartThings fallbacks. media_player.py is
 not importable without Home Assistant, so this is checked structurally and the
 tri-state reader is checked by extraction.
 """
@@ -78,41 +78,37 @@ class ArtModeIsOnTest(unittest.TestCase):
             "    @property\n    def extra_state_attributes",
         )
 
-    def test_the_panel_is_consulted_after_the_ip_flag_cache(self):
+    def test_the_shared_panel_precedes_the_cached_ip_flag(self):
+        panel = self.block.index("shared = self._shared_panel_art_state()")
         flag = self.block.index("if self._ip_art_mode is not None:")
-        panel = self.block.index("panel_art = self._ip_control_panel_art_cached()")
-        self.assertLess(flag, panel)
+        self.assertLess(panel, flag)
 
     def test_the_panel_is_consulted_before_the_websocket_and_smartthings(self):
-        panel = self.block.index("panel_art = self._ip_control_panel_art_cached()")
+        panel = self.block.index("shared = self._shared_panel_art_state()")
         art_api = self.block.index("art_api.art_mode")
         ws = self.block.index("self._ws.artmode_status")
         self.assertLess(panel, art_api)
         self.assertLess(panel, ws)
 
     def test_only_a_readable_panel_short_circuits(self):
-        seg = self.block[
-            self.block.index("panel_art = self._ip_control_panel_art_cached()") :
-        ]
-        head = seg[: seg.index("PowerState")]
-        self.assertIn("panel_art is not None", head)
-        self.assertIn("return panel_art", head)
+        start = self.block.index("shared = self._shared_panel_art_state()")
+        end = self.block.index("if self._ip_art_mode is not None:", start)
+        head = self.block[start:end]
+        self.assertIn("if shared is not None:", head)
+        self.assertIn("return mode if override is None else override", head)
 
     def test_the_panel_is_only_trusted_on_art_capable_tvs(self):
-        # pictureMode 'Ambient' also means Samsung Ambient Mode on a non-Frame
-        # set (#248 regression), so the panel value is gated by support_art_mode.
-        seg = self.block[
-            self.block.index("panel_art = self._ip_control_panel_art_cached()") :
-        ]
-        guard = seg[: seg.index("return panel_art")]
-        self.assertIn("self.support_art_mode != ArtModeSupport.UNSUPPORTED", guard)
+        helper = _block(
+            MEDIA_PLAYER,
+            "    def _shared_panel_art_state",
+            "    def _apply_shared_panel_art_state",
+        )
+        self.assertIn("self.support_art_mode == ArtModeSupport.UNSUPPORTED", helper)
+        self.assertIn("return None", helper)
 
     def test_the_running_app_guard_still_leads(self):
-        # A real foreground app must still win over any art signal. Matched on
-        # the attribute rather than the full expression: the guard is now also
-        # gated on the TV being ON (#273), so black wraps it across lines.
         guard = self.block.index("self._running_app not in (")
-        panel = self.block.index("panel_art = self._ip_control_panel_art_cached()")
+        panel = self.block.index("shared = self._shared_panel_art_state()")
         self.assertLess(guard, panel)
 
 

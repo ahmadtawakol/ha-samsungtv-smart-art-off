@@ -19,6 +19,8 @@ import asyncio
 from pathlib import Path
 import unittest
 
+from tests.test_art_poll_gated_on_art_mode import _policy_namespace
+
 ROOT = Path(__file__).parents[1] / "custom_components" / "samsungtv_smart"
 SENSOR = (ROOT / "sensor.py").read_text()
 ART = (ROOT / "api" / "art.py").read_text()
@@ -37,6 +39,9 @@ class _Clock:
     def time(self):
         return self.now
 
+    def monotonic(self):
+        return self.now
+
     def advance(self, seconds):
         self.now += seconds
 
@@ -48,6 +53,8 @@ def _load_methods():
     """Exec the coordinator methods we exercise, from source."""
     wanted = (
         "    async def _async_update_data",
+        "    def _should_refresh_art_status",
+        "    def _shared_panel_art_status",
         "    def _content_list_interval",
         "    def _artwork_count_is_fresh",
         "    def invalidate_artwork_count",
@@ -66,15 +73,18 @@ def _load_methods():
             if i > 0
         )
         body += SENSOR[begin:end] + "\n"
-    namespace = {
-        "asyncio": asyncio,
-        "time": CLOCK,
-        "UpdateFailed": _UpdateFailed,
-        "CONF_SLIDESHOW_API": "slideshow_api",
-        "CONF_CONTENT_LIST_INTERVAL": "content_list_interval",
-        "DEFAULT_CONTENT_LIST_INTERVAL": 300,
-        "Any": object,
-    }
+    namespace = _policy_namespace(CLOCK)
+    namespace.update(
+        {
+            "asyncio": asyncio,
+            "time": CLOCK,
+            "UpdateFailed": _UpdateFailed,
+            "CONF_SLIDESHOW_API": "slideshow_api",
+            "CONF_CONTENT_LIST_INTERVAL": "content_list_interval",
+            "DEFAULT_CONTENT_LIST_INTERVAL": 300,
+            "Any": object,
+        }
+    )
     exec(compile("class _Holder:\n" + body, "sensor.py", "exec"), namespace)
     return namespace["_Holder"]
 
