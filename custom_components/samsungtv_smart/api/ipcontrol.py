@@ -28,9 +28,10 @@ loads CA certs from disk, which would block the event loop if done at __init__.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
+from copy import deepcopy
 import http.client
 import json
 import logging
@@ -60,6 +61,22 @@ _PRIORITY_REQUEST: ContextVar[bool] = ContextVar(
     "samsungtv_ip_priority_request", default=False
 )
 
+# Share only authenticated getters without parameters or side effects.
+_SHAREABLE_READ_METHODS = frozenset(
+    {
+        "powerControl",
+        "getTVStates",
+        "getVideoStates",
+        "pictureModeControl",
+        "speakerSelectControl",
+        "muteControl",
+        "directVolumeControl",
+        "externalSpeakerControl",
+        "directChannelControl",
+        "colorToneControl",
+    }
+)
+
 
 @contextmanager
 def priority_requests() -> Iterator[None]:
@@ -74,6 +91,18 @@ def priority_requests() -> Iterator[None]:
         yield
     finally:
         _PRIORITY_REQUEST.reset(token)
+
+
+class _SharedRead:
+    def __init__(self) -> None:
+        self.task: asyncio.Task[dict[str, Any]] | None = None
+        self.started = False
+        self.waiters = 0
+        self.shared = False
+
+
+class _ReadContextChanged(Exception):
+    """Retry after the token or endpoint changes while a read is queued."""
 
 
 class _HostGate:
@@ -99,6 +128,43 @@ class _HostGate:
         # (class, arrival, waiter): class 0 is user-initiated, 1 background.
         self._waiters: list[tuple[int, int, asyncio.Future]] = []
         self._arrivals = 0
+        self._read_generation = 0
+        self._shared_reads: dict[tuple, _SharedRead] = {}
+
+    async def share_queued_read(
+        self,
+        key: tuple,
+        request: Callable[[_SharedRead], Awaitable[dict[str, Any]]],
+    ) -> dict[str, Any]:
+        """Share queued reads; a read that has started cannot be reused."""
+        flight = self._shared_reads.get(key)
+        if flight is None or flight.started or flight.task.done():
+            flight = _SharedRead()
+            flight.task = asyncio.create_task(request(flight))
+            self._shared_reads[key] = flight
+
+            def finished(task: asyncio.Task) -> None:
+                if self._shared_reads.get(key) is flight:
+                    self._shared_reads.pop(key)
+                # Consume errors when every waiter has cancelled.
+                if not task.cancelled():
+                    task.exception()
+
+            flight.task.add_done_callback(finished)
+        else:
+            flight.shared = True
+
+        flight.waiters += 1
+        try:
+            # One cancelled waiter must not cancel the shared read.
+            result = await asyncio.shield(flight.task)
+            return deepcopy(result) if flight.shared else result
+        finally:
+            flight.waiters -= 1
+            if not flight.waiters and not flight.started and not flight.task.done():
+                if self._shared_reads.get(key) is flight:
+                    self._shared_reads.pop(key)
+                flight.task.cancel()
 
     @asynccontextmanager
     async def acquire(self, *, priority: bool = False) -> AsyncIterator[None]:
@@ -822,10 +888,50 @@ class SamsungIPControl:
         SamsungIPControl instance). A call made inside ``priority_requests``
         overtakes the background polls already queued on that gate.
         """
-        async with _host_lock(self._host).acquire(priority=_PRIORITY_REQUEST.get()):
-            return await self._hass.async_add_executor_job(
-                self._sync_request, method, params, include_token, timeout
-            )
+        gate = _host_lock(self._host)
+        priority = _PRIORITY_REQUEST.get()
+        read_only = (
+            method in _SHAREABLE_READ_METHODS and params is None and include_token
+        )
+
+        async def request(
+            flight: _SharedRead | None = None,
+            expected_context: tuple | None = None,
+        ) -> dict[str, Any]:
+            async with gate.acquire(priority=priority):
+                if flight is not None:
+                    if (self._port, self._token) != expected_context:
+                        raise _ReadContextChanged
+                    flight.started = True
+                return await self._hass.async_add_executor_job(
+                    self._sync_request, method, params, include_token, timeout
+                )
+
+        if read_only and not priority:
+            # A write separates queued reads so replies cannot predate the command.
+            while True:
+                context = (self._port, self._token)
+                key = (
+                    id(self._hass),
+                    *context,
+                    method,
+                    timeout,
+                    gate._read_generation,
+                )
+
+                async def queued_read(
+                    flight: _SharedRead, expected: tuple = context
+                ) -> dict[str, Any]:
+                    return await request(flight, expected)
+
+                try:
+                    return await gate.share_queued_read(key, queued_read)
+                except _ReadContextChanged:
+                    # Pairing may change the token while this read waits for the gate.
+                    continue
+        if not read_only:
+            gate._read_generation += 1
+        return await request()
 
     def _build_ssl_context(self, legacy: bool) -> ssl.SSLContext:
         """Build the SSL context for talking to the TV.

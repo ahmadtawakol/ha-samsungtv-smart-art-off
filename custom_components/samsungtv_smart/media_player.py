@@ -758,6 +758,7 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
     _shared_ip_coordinator: Any | None = None
     _shared_ip_unsub: Callable[[], None] | None = None
     _ip_power_off_observed_at: float | None = None
+    _shared_ip_visible: tuple | None = None
 
     def __init__(
         self,
@@ -2494,13 +2495,45 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
         self._ip_art_mode, self._ip_art_mode_at = mode, observed_at
         self._ip_power_off_observed_at = None
         self._ip_art_mode_failures = 0
-        if changed:
+        if changed and self._shared_ip_needs_publish():
             self.async_write_ha_state()
         return True
 
+    def _shared_ip_needs_publish(self) -> bool:
+        if self.force_update:
+            return True
+        coordinator = self._get_ip_control_state_coordinator()
+        data = getattr(coordinator, "data", None)
+        data = data if isinstance(data, dict) else {}
+        tv = data.get("tv")
+        tv = tv if isinstance(tv, dict) else {}
+        channel = data.get("channel")
+        channel = channel if isinstance(channel, dict) else {}
+        visible = (
+            getattr(coordinator, "last_update_success", False),
+            data.get("powered_off"),
+            (type(tv.get("inputSource")), tv.get("inputSource")),
+            (type(tv.get("pictureMode")), tv.get("pictureMode")),
+            (type(channel.get("channelNum")), channel.get("channelNum")),
+        )
+        changed = visible != self._shared_ip_visible
+        self._shared_ip_visible = visible
+        states = getattr(self.hass, "states", None)
+        entity_id = getattr(self, "entity_id", None)
+        published = states.get(entity_id) if states and entity_id else None
+        if changed or published is None:
+            return True
+        # An unchanged poll can still outlive the event grace period.
+        art = self._art_mode_is_on()
+        expected = None if art is None else STATE_ON if art else STATE_OFF
+        return (
+            published.attributes.get(ATTR_ART_MODE_STATUS) != expected
+            or published.state != self.state
+        )
+
     @callback
     def _shared_ip_updated(self) -> None:
-        if not self._apply_shared_panel_art_state():
+        if not self._apply_shared_panel_art_state() and self._shared_ip_needs_publish():
             self.async_write_ha_state()
 
     def _attach_shared_ip_listener(self) -> None:

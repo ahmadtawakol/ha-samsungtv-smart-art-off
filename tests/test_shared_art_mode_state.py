@@ -224,3 +224,67 @@ def test_normal_mode_is_a_real_false_value_not_an_unavailable_reading():
 def test_power_off_and_expired_events_cannot_override_a_current_snapshot():
     assert art_broadcast_override(None, (True, 100), now=101) is None
     assert art_broadcast_override(100, (True, 100), now=121) is None
+
+
+def _published_device(device):
+    device.entity_id = "media_player.example"
+    device._power_off_in_progress = Mock(return_value=False)
+    device._report_art_mode_as_off = True
+    published = SimpleNamespace(
+        state=MediaPlayerState.OFF, attributes={"art_mode_status": "on"}
+    )
+    device.hass.states = SimpleNamespace(get=lambda _: published)
+
+    def publish():
+        mode = device._art_mode_is_on()
+        published.attributes["art_mode_status"] = "on" if mode else "off"
+        published.state = device.state
+
+    device.async_write_ha_state.side_effect = publish
+    return published
+
+
+def test_timestamp_only_shared_responses_do_not_republish_unchanged_state(device):
+    _published_device(device)
+    coordinator = device._get_ip_control_state_coordinator()
+    device._attach_shared_ip_listener()
+    for _ in range(100):
+        coordinator.emit("Movie")
+    assert device.async_write_ha_state.call_count == 1
+    coordinator.emit("Ambient")
+    assert device.async_write_ha_state.call_count == 2
+    assert device.state == MediaPlayerState.OFF
+
+
+def test_source_or_channel_changes_still_publish_from_the_shared_response(device):
+    _published_device(device)
+    coordinator = device._get_ip_control_state_coordinator()
+    device._attach_shared_ip_listener()
+    coordinator.data["tv"]["inputSource"] = "HDMI2"
+    coordinator.emit("Movie")
+    coordinator.data["channel"] = {"channelNum": "7"}
+    coordinator.emit("Movie")
+    assert device.async_write_ha_state.call_count == 3
+
+
+def test_broadcast_grace_expiry_still_publishes_when_raw_fields_do_not_change(
+    device, monkeypatch
+):
+    from custom_components.samsungtv_smart import media_player
+
+    now = [time.monotonic()]
+    monkeypatch.setattr(media_player, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    published = _published_device(device)
+    coordinator = device._get_ip_control_state_coordinator()
+    coordinator.data["polled_at"] = now[0]
+    device.hass.data[DOMAIN][device._entry_id][DATA_ART_API].art_mode_last_broadcast = (
+        True,
+        now[0],
+    )
+    device._attach_shared_ip_listener()
+    assert published.attributes["art_mode_status"] == "on"
+    now[0] += 21
+    coordinator.data["polled_at"] = now[0]
+    device._shared_ip_updated()
+    assert published.attributes["art_mode_status"] == "off"
+    assert published.state == MediaPlayerState.ON
