@@ -211,10 +211,14 @@
           "st_poll_on_interval": "SmartThings interval when on (s)",
           "ip_control_poll_interval": "IP Control interval (s)",
           "content_list_interval": "Art content list refresh interval (s)",
-          "art_exit_source": "Source after leaving Art Mode"
+          "art_exit_source": "Source after leaving Art Mode",
+          "rest_app_list": "Additional apps to detect",
+          "separate_app_source": "Keep input source separate from apps"
         },
         "data_description": {
-          "art_exit_source": "Input or app to switch to when Art Mode is turned off from Home Assistant (Art Mode switch or art_set_artmode). Leave empty to keep the TV's own behaviour: it goes back to its last source, often TV (Samsung TV Plus) on a Frame. Not applied when Art Mode is left with the remote. Needs a source the TV can reach: a list auto-discovered from SmartThings holds ST_ keys, which fall back to the equivalent WebSocket key (ST_HDMI3 -> KEY_HDMI3) when SmartThings is unavailable. Some models ignore the numbered HDMI keys; the log says so when the TV did not move."
+          "art_exit_source": "Input or app to switch to when Art Mode is turned off from Home Assistant (Art Mode switch or art_set_artmode). Leave empty to keep the TV's own behaviour: it goes back to its last source, often TV (Samsung TV Plus) on a Frame. Not applied when Art Mode is left with the remote. Needs a source the TV can reach: a list auto-discovered from SmartThings holds ST_ keys, which fall back to the equivalent WebSocket key (ST_HDMI3 -> KEY_HDMI3) when SmartThings is unavailable. Some models ignore the numbered HDMI keys; the log says so when the TV did not move.",
+          "rest_app_list": "Map display names to native Tizen app IDs for apps missing from automatic discovery. Leave empty to disable additional REST status checks.",
+          "separate_app_source": "When a local input reading is available, keep source as the physical input and report the foreground app through app_name and app_id."
         }
       },
       "save_exit": {
@@ -237,7 +241,8 @@
       "invalid_tv_list": "Invalid list format. Please use valid JSON format.",
       "ip_control_pair_failed": "Pairing failed. Make sure the TV is on and in normal viewing (not Art Mode), and that IP Remote is enabled, then try again.",
       "ip_control_unreachable": "Could not reach the TV on port 1516 -- nothing is listening there. This model most likely does not support IP Control; the TV's state and the IP Remote setting are not the cause. Only the backlight, colour tone, picture calibration and reboot entities depend on it.",
-      "ip_control_no_host": "No host address is configured for this TV."
+      "ip_control_no_host": "No host address is configured for this TV.",
+      "invalid_rest_app_list": "Enter unique display names and native app IDs using letters, digits, dots, underscores or hyphens."
     }
   },
   "application_credentials": {
