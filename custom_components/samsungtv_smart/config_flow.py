@@ -96,6 +96,7 @@ from .const import (
     CONF_PING_PORT,
     CONF_POWER_ON_METHOD,
     CONF_RECONFIGURE_GENERATION,
+    CONF_REPORT_ART_MODE_AS_OFF,
     CONF_REST_PORT,
     CONF_SHOW_CHANNEL_NR,
     CONF_SOURCE_LIST,
@@ -116,6 +117,7 @@ from .const import (
     DEFAULT_CONTENT_LIST_INTERVAL,
     DEFAULT_IP_CONTROL_POLL_INTERVAL,
     DEFAULT_PORT,
+    DEFAULT_REPORT_ART_MODE_AS_OFF,
     DEFAULT_ST_POLL_ON_INTERVAL,
     DOMAIN,
     IP_CONTROL_PORTS,
@@ -181,6 +183,7 @@ ADVANCED_OPTIONS = [
     CONF_WOL_REPEAT,
     CONF_TOGGLE_ART_MODE,
     CONF_USE_MUTE_CHECK,
+    CONF_REPORT_ART_MODE_AS_OFF,
 ]
 
 ENUM_OPTIONS = [
@@ -1852,6 +1855,12 @@ class OptionsFlowHandler(OptionsFlow):
                 vol.Required(
                     CONF_TOGGLE_ART_MODE,
                     default=options.get(CONF_TOGGLE_ART_MODE, False),
+                ): bool,
+                vol.Required(
+                    CONF_REPORT_ART_MODE_AS_OFF,
+                    default=options.get(
+                        CONF_REPORT_ART_MODE_AS_OFF, DEFAULT_REPORT_ART_MODE_AS_OFF
+                    ),
                 ): bool,
                 vol.Optional(
                     CONF_ART_EXIT_SOURCE,
