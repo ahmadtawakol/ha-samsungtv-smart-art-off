@@ -214,13 +214,15 @@
           "art_exit_source": "Source after leaving Art Mode",
           "rest_app_list": "Additional apps to detect",
           "separate_app_source": "Keep input source separate from apps",
-          "report_art_mode_as_off": "Report media player off in Art Mode"
+          "report_art_mode_as_off": "Report media player off in Art Mode",
+          "external_audio_entity": "External soundbar or receiver status entity"
         },
         "data_description": {
           "art_exit_source": "Input or app to switch to when Art Mode is turned off from Home Assistant (Art Mode switch or art_set_artmode). Leave empty to keep the TV's own behaviour: it goes back to its last source, often TV (Samsung TV Plus) on a Frame. Not applied when Art Mode is left with the remote.",
           "rest_app_list": "Map display names to native Tizen app IDs for apps missing from automatic discovery. Leave empty to disable additional REST status checks.",
           "separate_app_source": "When a local input reading is available, keep source as the physical input and report the foreground app through app_name and app_id.",
-          "report_art_mode_as_off": "Optional: report artwork as off while keeping art_mode_status on. Normal viewing remains on; physical power tracking and Art Mode controls continue. Disabled by default."
+          "report_art_mode_as_off": "Optional: report artwork as off while keeping art_mode_status on. Normal viewing remains on; physical power tracking and Art Mode controls continue. Disabled by default.",
+          "external_audio_entity": "Optional: use an existing media player for actual volume and mute feedback while the TV uses external speakers. TV controls stay unchanged. Leave empty to use the TV readings. No additional polling is added."
         }
       },
       "save_exit": {
