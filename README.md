@@ -665,6 +665,16 @@ SmartThings cloud rather than local IP Control), so without it a TV waking
 straight into Art Mode briefly looks like someone switched it on. Debouncing
 the rise only keeps "turned off" instantaneous.
 
+### Optional off state during Art Mode
+
+Enable **Report media player off in Art Mode** to show the media player as `off`
+while artwork is displayed. `art_mode_status` remains `on`, and the Power switch
+still shows that the TV is physically on. Turning the media player on returns
+to normal viewing.
+
+The option is disabled by default. Status updates and controls continue while
+artwork is showing.
+
 ### Frame Art Sensor Attributes
 
 - `art_mode` — current Art Mode state
